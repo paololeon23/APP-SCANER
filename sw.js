@@ -1,4 +1,4 @@
-const CACHE_NAME = 'qberries-dni-simple-v5';
+const CACHE_NAME = 'qberries-dni-simple-v14';
 const ASSETS = [
   './',
   './index.html',

@@ -60,25 +60,77 @@ video {
 
 .overlay[hidden] { display: none; }
 
-.scan-line {
+.scan-mask {
   position: absolute;
-  left: 8%;
-  right: 8%;
-  top: 18%;
-  height: 3px;
-  background: #e10600;
-  box-shadow: 0 0 10px #e10600, 0 0 2px #ff4d4d;
-  border-radius: 2px;
+  inset: 0;
   z-index: 3;
-  animation: scanMove 1.6s ease-in-out infinite alternate;
   pointer-events: none;
 }
 
-.scan-line[hidden] { display: none; }
+.scan-mask[hidden] { display: none; }
 
-@keyframes scanMove {
-  from { top: 18%; }
-  to { top: 78%; }
+/* Contorno DNI (como antes) */
+.card-guide {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 96%;
+  aspect-ratio: 1.58 / 1;
+  transform: translate(-50%, -50%);
+  border: 1.5px dashed rgba(255, 255, 255, 0.7);
+  border-radius: 10px;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.45);
+}
+
+/* ROI = mismo ancho que el borde punteado del DNI. Sin sombra blanca. */
+.scan-box {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 96%;
+  aspect-ratio: 5 / 1;
+  height: auto;
+  transform: translate(-50%, -50%);
+  border: 0;
+  outline: 0;
+  border-radius: 0;
+  overflow: visible;
+  background: transparent;
+  box-shadow: none;
+}
+
+/* Línea roja de borde a borde del recuadro punteado */
+.scan-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  width: 100%;
+  top: 6%;
+  height: 4px;
+  margin: 0;
+  background: #e10600;
+  box-shadow: 0 0 8px #e10600;
+  animation: scanMoveY 0.55s linear infinite alternate;
+}
+
+.scan-label {
+  position: absolute;
+  left: 50%;
+  top: calc(100% + 8px);
+  transform: translateX(-50%);
+  white-space: nowrap;
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.65);
+  padding: 4px 8px;
+  border-radius: 6px;
+}
+
+@keyframes scanMoveY {
+  from { top: 6%; }
+  to { top: calc(94% - 4px); }
 }
 
 .primary {
@@ -119,6 +171,7 @@ video {
   font-weight: 800;
   font-size: 1.05rem;
   letter-spacing: 0.02em;
+  white-space: pre-line;
 }
 
 .banner.ok {

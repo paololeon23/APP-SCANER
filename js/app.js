@@ -5,26 +5,29 @@ const video = $('camera');
 const statusEl = $('status');
 const bannerEl = $('banner');
 const listEl = $('list');
+const cameraWrap = $('cameraWrap');
+const scanBox = $('scanBox');
 
-let codeReader = null;
-let controls = null;
+const STORAGE_KEY = 'qberries-dni-registry-v1';
+const MAX_LIST_RENDER = 120;
+
+let stream = null;
 let scanning = false;
 let busy = false;
-let lastRaw = '';
+let lastDni = '';
 let lastAt = 0;
 let speechUnlocked = false;
+let scanTimer = null;
+let reader = null;
+let canvas = null;
+let ctx = null;
 
-/** @type {{ dni: string, raw: string, time: string, duplicate: boolean }[]} */
-const registry = [];
+/** @type {{ dni: string, time: string }[]} */
+let registry = [];
 const seen = new Set();
 /** @type {string[]} */
 const speakQueue = [];
 let speaking = false;
-
-const DIGITS = {
-  0: 'cero', 1: 'uno', 2: 'dos', 3: 'tres', 4: 'cuatro',
-  5: 'cinco', 6: 'seis', 7: 'siete', 8: 'ocho', 9: 'nueve'
-};
 
 function setStatus(msg, kind = '') {
   statusEl.textContent = msg;
@@ -43,10 +46,9 @@ function unlockSpeech() {
     const warm = new SpeechSynthesisUtterance('ok');
     warm.volume = 0.01;
     warm.rate = 2;
-    warm.onend = () => { speechUnlocked = true; };
     speechSynthesis.speak(warm);
     speechUnlocked = true;
-  } catch { /* iOS / navegador sin voz */ }
+  } catch { /* ignore */ }
 }
 
 function pickFemaleVoice() {
@@ -64,7 +66,6 @@ function pickFemaleVoice() {
   );
 }
 
-/** Chrome a veces deja speechSynthesis en pause y se queda mudo. */
 if ('speechSynthesis' in window) {
   setInterval(() => {
     try {
@@ -78,82 +79,91 @@ function pumpSpeak() {
   speaking = true;
   const text = speakQueue.shift();
 
-  const play = () => {
+  try {
+    if (speechSynthesis.speaking || speechSynthesis.pending) speechSynthesis.cancel();
+  } catch { /* ignore */ }
+
+  window.setTimeout(() => {
+    const utter = new SpeechSynthesisUtterance(text);
+    utter.lang = 'es-PE';
+    utter.rate = 1.08;
+    utter.pitch = 1.12;
+    utter.volume = 1;
+    const voice = pickFemaleVoice();
+    if (voice) {
+      utter.voice = voice;
+      utter.lang = voice.lang || 'es-PE';
+    }
+    const done = () => {
+      speaking = false;
+      window.setTimeout(pumpSpeak, 80);
+    };
+    utter.onend = done;
+    utter.onerror = done;
     try {
-      // En iOS, cancelar justo antes puede dejarlo mudo; solo cancelar si hay cola/ruido.
-      if (speechSynthesis.speaking || speechSynthesis.pending) {
-        speechSynthesis.cancel();
-      }
-    } catch { /* ignore */ }
-
-    window.setTimeout(() => {
-      const utter = new SpeechSynthesisUtterance(text);
-      utter.lang = 'es-PE';
-      utter.rate = 0.9;
-      utter.pitch = 1.12;
-      utter.volume = 1;
-      const voice = pickFemaleVoice();
-      if (voice) {
-        utter.voice = voice;
-        utter.lang = voice.lang || 'es-PE';
-      }
-
-      const done = () => {
-        speaking = false;
-        window.setTimeout(pumpSpeak, 180);
-      };
-      utter.onend = done;
-      utter.onerror = done;
-
-      try {
-        speechSynthesis.speak(utter);
-        // Si el motor no arranca, no bloquear la cola.
-        window.setTimeout(() => {
-          if (speaking && !speechSynthesis.speaking && !speechSynthesis.pending) done();
-        }, 4000);
-      } catch {
-        done();
-      }
-    }, 60);
-  };
-
-  play();
+      speechSynthesis.speak(utter);
+      window.setTimeout(() => {
+        if (speaking && !speechSynthesis.speaking && !speechSynthesis.pending) done();
+      }, 2200);
+    } catch {
+      done();
+    }
+  }, 40);
 }
 
 function enqueueSpeak(text) {
   if (!text || !('speechSynthesis' in window)) return;
+  speakQueue.length = 0;
   speakQueue.push(text);
-  // Evita cola eterna si escanean muy rápido: máximo 3 pendientes.
-  while (speakQueue.length > 3) speakQueue.shift();
   pumpSpeak();
 }
 
-function speakDni(dni, duplicate) {
-  const nums = [...dni].map((d) => DIGITS[d]).join(', ');
-  if (duplicate) enqueueSpeak(`Ya registrado. D N I: ${nums}`);
-  else enqueueSpeak(`D N I: ${nums}`);
+function isValidDni(value) {
+  return /^\d{8}$/.test(value) && value !== '00000000';
 }
 
 function extractDni(raw) {
   const text = String(raw || '').replace(/\u0000/g, ' ').trim();
+  if (!text) return '';
+
   const compact = text.replace(/\s+/g, '');
+  if (isValidDni(compact)) return compact;
+  if (/^\d{9}$/.test(compact) && isValidDni(compact.slice(0, 8))) return compact.slice(0, 8);
 
-  if (/^\d{8}$/.test(compact)) return compact;
-  if (/^\d{8}\d$/.test(compact)) return compact.slice(0, 8);
-  const onlyDigits = compact.replace(/\D/g, '');
-  if (/^\d{8}$/.test(onlyDigits)) return onlyDigits;
+  const mrz = text.toUpperCase().match(/I<PER(\d{8})</);
+  if (mrz && isValidDni(mrz[1])) return mrz[1];
 
-  if (compact.length >= 10 && /^\d{2}\d{8}/.test(compact)) {
-    return compact.slice(2, 10);
-  }
+  const labelled = text.match(/(?:DNI|CUI|NUM(?:ERO)?(?:\s*DE)?\s*DNI)\s*[:#=\-]?\s*(\d{8})(?!\d)/i);
+  if (labelled && isValidDni(labelled[1])) return labelled[1];
 
-  const labelled = text.match(/(?:DNI|CUI|N(?:UMERO|ÚMERO)\s*(?:DE\s*)?DNI)\s*[:#-]?\s*(\d{8})(?!\d)/i);
-  if (labelled) return labelled[1];
+  const only = compact.replace(/\D/g, '');
+  if (isValidDni(only)) return only;
+
+  const groups = [...text.matchAll(/(?:^|[^\d])(\d{8})(?!\d)/g)].map((m) => m[1]);
+  const unique = [...new Set(groups)].filter(isValidDni);
+  if (unique.length === 1 && only.length <= 12) return unique[0];
   return '';
 }
 
 function nowTime() {
   return new Date().toLocaleTimeString('es-PE', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function persist() {
+  try {
+    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(registry));
+  } catch { /* cuota / modo privado */ }
+}
+
+function restore() {
+  try {
+    const raw = sessionStorage.getItem(STORAGE_KEY);
+    if (!raw) return;
+    const data = JSON.parse(raw);
+    if (!Array.isArray(data)) return;
+    registry = data.filter((x) => x && isValidDni(x.dni));
+    registry.forEach((x) => seen.add(x.dni));
+  } catch { /* ignore */ }
 }
 
 function renderList() {
@@ -162,51 +172,123 @@ function renderList() {
     listEl.innerHTML = '<li class="empty">Aún no hay escaneos</li>';
     return;
   }
-  listEl.innerHTML = registry.map((item, i) => `
+  const visible = registry.slice(0, MAX_LIST_RENDER);
+  listEl.innerHTML = visible.map((item, i) => `
     <li>
-      <div>
-        <div class="num">${item.dni || '—'}</div>
-        <div class="meta">${item.raw.length > 42 ? item.raw.slice(0, 42) + '…' : item.raw}</div>
-      </div>
+      <div class="num">${item.dni}</div>
       <div class="meta">
         <div>#${registry.length - i} · ${item.time}</div>
-        <span class="tag ${item.duplicate ? 'dup' : 'new'}">${item.duplicate ? 'Ya registrado' : 'Nuevo'}</span>
+        <span class="tag new">Registrado</span>
       </div>
     </li>
   `).join('');
 }
 
-function handleRead(raw) {
-  const dni = extractDni(raw);
-  const key = dni || raw;
-  const duplicate = seen.has(key);
-  seen.add(key);
-
-  registry.unshift({
-    dni: dni || '(sin DNI)',
-    raw,
-    time: nowTime(),
-    duplicate
-  });
-  renderList();
-
-  if (duplicate) {
-    showBanner(dni ? `DUPLICADO · YA REGISTRADO\n${dni}` : 'DUPLICADO · YA REGISTRADO', 'dup');
-    setStatus(dni ? `Ya registrado: ${dni}` : 'Código ya registrado', 'dup');
-    if (dni) speakDni(dni, true);
-    else enqueueSpeak('Ya registrado');
-  } else {
-    showBanner(dni ? `CAPTURADO\n${dni}` : 'CAPTURADO', 'ok');
-    setStatus(dni ? `Nuevo: ${dni}` : 'Código capturado', 'ok');
-    if (dni) speakDni(dni, false);
-    else enqueueSpeak('Código capturado');
+function handleValidDni(dni) {
+  if (seen.has(dni)) {
+    showBanner(`DNI YA REGISTRADO\n${dni}`, 'dup');
+    setStatus(`Ya registrado · Total ${registry.length}`, 'dup');
+    enqueueSpeak('DNI ya registrado');
+    return;
   }
+
+  seen.add(dni);
+  registry.unshift({ dni, time: nowTime() });
+  persist();
+  renderList();
+  showBanner(`DNI REGISTRADO\n${dni}`, 'ok');
+  setStatus(`Registrado · Total ${registry.length}`, 'ok');
+  enqueueSpeak('DNI registrado');
+}
+
+function grabRoiFrame() {
+  if (!video.videoWidth || !video.videoHeight) return null;
+
+  const wrap = cameraWrap.getBoundingClientRect();
+  const box = scanBox.getBoundingClientRect();
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+  const scale = Math.max(wrap.width / vw, wrap.height / vh);
+  const dispW = vw * scale;
+  const dispH = vh * scale;
+  const offX = (wrap.width - dispW) / 2;
+  const offY = (wrap.height - dispH) / 2;
+
+  const sx = Math.max(0, Math.floor((box.left - wrap.left - offX) / scale));
+  const sy = Math.max(0, Math.floor((box.top - wrap.top - offY) / scale));
+  const sw = Math.min(vw - sx, Math.floor(box.width / scale));
+  const sh = Math.min(vh - sy, Math.floor(box.height / scale));
+  if (sw < 20 || sh < 20) return null;
+
+  if (!canvas) {
+    canvas = document.createElement('canvas');
+    ctx = canvas.getContext('2d', { willReadFrequently: true });
+  }
+  canvas.width = sw;
+  canvas.height = sh;
+  ctx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
+  return canvas;
+}
+
+function buildReader() {
+  // Prioriza Code 39 (DNI azul/electrónico). QR de respaldo. Sin PDF417 = más rápido en cola.
+  const hints = new Map();
+  hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
+    ZXing.BarcodeFormat.CODE_39,
+    ZXing.BarcodeFormat.QR_CODE
+  ]);
+  hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+  const r = new ZXing.MultiFormatReader();
+  r.setHints(hints);
+  return r;
+}
+
+function decodeCanvas(c) {
+  if (!window.ZXing || !reader) return null;
+  try {
+    const luminance = new ZXing.HTMLCanvasElementLuminanceSource(c);
+    const binary = new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(luminance));
+    const result = reader.decode(binary);
+    reader.reset();
+    return result ? String(result.getText() || '').trim() : null;
+  } catch {
+    try { reader.reset(); } catch { /* ignore */ }
+    return null;
+  }
+}
+
+function scanTick() {
+  if (!scanning) return;
+
+  if (!busy && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+    const frame = grabRoiFrame();
+    if (frame) {
+      const raw = decodeCanvas(frame);
+      if (raw) {
+        const dni = extractDni(raw);
+        if (isValidDni(dni)) {
+          const now = Date.now();
+          const sameTooSoon = dni === lastDni && now - lastAt < 2200;
+          const nextTooSoon = dni !== lastDni && now - lastAt < 700;
+          if (!sameTooSoon && !nextTooSoon) {
+            lastDni = dni;
+            lastAt = now;
+            busy = true;
+            handleValidDni(dni);
+            window.setTimeout(() => { busy = false; }, 650);
+          }
+        }
+      }
+    }
+  }
+
+  scanTimer = window.setTimeout(scanTick, 150);
 }
 
 async function startScan() {
   if (scanning) return;
 
-  if (!window.ZXingBrowser?.BrowserMultiFormatReader) {
+  if (!window.ZXing) {
     setStatus('No se cargó el lector. Revisa tu conexión.', 'err');
     return;
   }
@@ -216,56 +298,31 @@ async function startScan() {
   }
 
   unlockSpeech();
-  speechSynthesis.getVoices();
+  if ('speechSynthesis' in window) speechSynthesis.getVoices();
   setStatus('Abriendo cámara…');
   $('startBtn').disabled = true;
 
   try {
-    codeReader = new ZXingBrowser.BrowserMultiFormatReader();
-    $('overlay').hidden = true;
-    $('scanLine').hidden = false;
-    scanning = true;
-    setStatus('Leyendo en vivo…');
-
-    controls = await codeReader.decodeFromConstraints(
-      {
-        audio: false,
-        video: {
-          facingMode: 'environment',
-          width: { ideal: 1280 },
-          height: { ideal: 720 }
-        }
-      },
-      video,
-      (result) => {
-        if (!result || busy) return;
-        const raw = String(result.getText() || '').trim();
-        if (!raw) return;
-
-        let format = '';
-        try {
-          const fmt = result.getBarcodeFormat ? result.getBarcodeFormat() : result.format;
-          format = String(fmt || '');
-        } catch { /* ignore */ }
-        const isCode39 = /CODE_?39/i.test(format);
-        const dni = extractDni(raw);
-        if (!dni && !isCode39) return;
-
-        const now = Date.now();
-        // Mismo código: espera 2.8s. Otro DNI: puede entrar tras el bloqueo corto.
-        if (raw === lastRaw && now - lastAt < 2800) return;
-        lastRaw = raw;
-        lastAt = now;
-
-        busy = true;
-        handleRead(raw);
-        // Bloqueo corto para no repetir el mismo fotograma; otros DNI sí entran.
-        window.setTimeout(() => { busy = false; }, 1500);
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        facingMode: { ideal: 'environment' },
+        width: { ideal: 1920 },
+        height: { ideal: 1080 }
       }
-    );
+    });
+    video.srcObject = stream;
+    await video.play();
+
+    reader = buildReader();
+    $('overlay').hidden = true;
+    $('scanMask').hidden = false;
+    scanning = true;
+    setStatus(`Listo para personal · Total ${registry.length}`);
+    scanTick();
   } catch (err) {
     scanning = false;
-    $('scanLine').hidden = true;
+    $('scanMask').hidden = true;
     $('overlay').hidden = false;
     $('startBtn').disabled = false;
     const msg = err?.name === 'NotAllowedError'
@@ -276,6 +333,8 @@ async function startScan() {
 }
 
 $('startBtn').addEventListener('click', startScan);
+
+restore();
 renderList();
 
 if ('speechSynthesis' in window) {
