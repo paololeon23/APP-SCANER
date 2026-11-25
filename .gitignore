@@ -1,0 +1,11 @@
+.DS_Store
+Thumbs.db
+*.log
+.node_modules/
+node_modules/
+.vscode/
+.idea/
+_decode_test.py
+*.zip
+.env
+.env.*
